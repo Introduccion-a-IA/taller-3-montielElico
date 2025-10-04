@@ -1,0 +1,158 @@
+name: Autocalificación de Taller
+
+# Se ejecuta cuando el estudiante hace push
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+# Permisos necesarios
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  autograding:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. Descargar el código del estudiante
+    - name: Checkout del repositorio
+      uses: actions/checkout@v4
+    
+    # 2. Configurar Python
+    - name: Configurar Python 3.10
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    # 3. Instalar dependencias
+    - name: Instalar dependencias
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest nbformat nbconvert jupyter ipykernel
+        pip install scikit-fuzzy numpy matplotlib
+        # Instalar librerías adicionales del curso
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    
+    # 4. Verificar que el notebook existe
+    - name: Verificar estructura de archivos
+      run: |
+        if [ ! -f "Notebook/Taller_3.ipynb" ]; then
+          echo "❌ Error: No se encontró el notebook en la ruta correcta"
+          echo "📁 Asegúrate de que tu notebook esté en: Notebook/Taller_3.ipynb"
+          exit 1
+        fi
+        echo "✅ Notebook encontrado correctamente"
+    
+    # 5. Ejecutar los tests
+    - name: Ejecutar tests de autocalificación
+      id: tests
+      run: |
+        pytest tests/test_notebook.py -v --tb=short --color=yes --junitxml=test-results.xml
+      continue-on-error: true
+    
+    # 6. Publicar resultados
+    - name: Publicar resultados de tests
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      if: always()
+      with:
+        files: test-results.xml
+        check_name: "📊 Resultados de Autocalificación"
+        comment_title: "📝 Resultados del Taller"
+    
+    # 7. Calcular y mostrar calificación
+    - name: Calcular calificación
+      if: always()
+      run: |
+        python - << 'EOF'
+        import xml.etree.ElementTree as ET
+        import os
+        
+        # Leer resultados de pytest
+        tree = ET.parse('test-results.xml')
+        root = tree.getroot()
+        
+        # Calcular estadísticas
+        total = int(root.attrib.get('tests', 0))
+        failures = int(root.attrib.get('failures', 0))
+        errors = int(root.attrib.get('errors', 0))
+        passed = total - failures - errors
+        
+        # Calcular nota (ajustar escala según necesites)
+        if total > 0:
+            percentage = (passed / total) * 100
+            grade = (passed / total) * 5.0  # Escala de 0-5
+        else:
+            percentage = 0
+            grade = 0
+        
+        # Mostrar resultados
+        print("\n" + "="*60)
+        print("📊 RESULTADOS DE AUTOCALIFICACIÓN")
+        print("="*60)
+        print(f"✅ Tests aprobados: {passed}/{total}")
+        print(f"❌ Tests fallidos: {failures + errors}")
+        print(f"📈 Porcentaje: {percentage:.1f}%")
+        print(f"📝 Calificación: {grade:.2f}/5.0")
+        print("="*60)
+        
+        # Guardar en variable de entorno para el siguiente step
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f"GRADE={grade:.2f}\n")
+            f.write(f"PERCENTAGE={percentage:.1f}\n")
+            f.write(f"PASSED={passed}\n")
+            f.write(f"TOTAL={total}\n")
+        EOF
+    
+    # 8. Crear comentario con resultados (opcional)
+    - name: Comentar resultados en PR
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const grade = process.env.GRADE;
+          const percentage = process.env.PERCENTAGE;
+          const passed = process.env.PASSED;
+          const total = process.env.TOTAL;
+          
+          const emoji = percentage >= 70 ? '🎉' : percentage >= 50 ? '👍' : '💪';
+          
+          const comment = `
+          ## ${emoji} Resultados de Autocalificación
+          
+          | Métrica | Resultado |
+          |---------|-----------|
+          | Tests Aprobados | ${passed}/${total} |
+          | Porcentaje | ${percentage}% |
+          | Calificación | **${grade}/5.0** |
+          
+          ${percentage >= 70 ? '✅ ¡Excelente trabajo!' : percentage >= 50 ? '👍 Buen progreso, sigue así' : '💪 Sigue trabajando, puedes lograrlo'}
+          
+          ---
+          💡 **Tip**: Revisa los detalles de los tests fallidos arriba para mejorar tu código.
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+    
+    # 9. Fallar el workflow si no se aprueba el mínimo
+    - name: Verificar calificación mínima
+      if: always()
+      run: |
+        GRADE=${{ env.GRADE }}
+        MINIMUM=3.0  # Calificación mínima para aprobar (ajustar según necesites)
+        
+        if (( $(echo "$GRADE < $MINIMUM" | bc -l) )); then
+          echo "❌ La calificación ($GRADE) está por debajo del mínimo requerido ($MINIMUM)"
+          echo "💡 Revisa los errores arriba y mejora tu código"
+          exit 1
+        else
+          echo "✅ ¡Aprobado! Calificación: $GRADE"
+        fi
